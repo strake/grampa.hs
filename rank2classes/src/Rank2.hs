@@ -8,10 +8,13 @@
 {-# LANGUAGE DefaultSignatures, InstanceSigs, KindSignatures, PolyKinds, Rank2Types #-}
 {-# LANGUAGE ScopedTypeVariables, StandaloneDeriving, TypeOperators, UndecidableInstances #-}
 {-# LANGUAGE EmptyCase #-}
+{-# LANGUAGE ConstrainedClassMethods #-}
+{-# LANGUAGE Trustworthy #-}
 module Rank2 (
 -- * Rank 2 classes
    Functor(..), Apply(..), Applicative(..),
-   Foldable(..), Traversable(..), Distributive(..), DistributiveTraversable(..), distributeJoin,
+   Foldable(..), Traversable(..), Filtrable (..), (<$?>), (<*?>),
+   Distributive(..), DistributiveTraversable(..), distributeJoin,
 -- * Rank 2 data types
    Compose(..), Empty(..), Only(..), Flip(..), Identity(..), Product(..), Sum(..), Arrow(..), type (~>),
 -- * Method synonyms and helper functions
@@ -24,6 +27,7 @@ import qualified Control.Applicative as Rank1
 import qualified Control.Monad as Rank1
 import qualified Data.Foldable as Rank1
 import qualified Data.Traversable as Rank1
+import qualified Data.Filtrable as Rank1
 import qualified Data.Functor.Compose as Rank1
 import qualified Data.Distributive as Rank1
 import Data.Coerce (coerce)
@@ -498,3 +502,49 @@ instance Distributive f => Distributive (Generics.Rec1 f) where
    cotraverse w f = Generics.Rec1 (cotraverse w (Rank1.fmap Generics.unRec1 f))
 instance (Distributive f, Distributive g) => Distributive ((Generics.:*:) f g) where
    cotraverse w f = cotraverse w (Rank1.fmap (\(a Generics.:*: _) -> a) f) Generics.:*: cotraverse w (Rank1.fmap (\(_ Generics.:*: b) -> b) f)
+
+class Functor g => Filtrable (g :: (k -> *) -> *) where
+  {-# MINIMAL mapMaybe | catMaybes #-}
+
+  filter :: (∀ k . a k -> Bool) -> g a -> g a
+  filter f = mapMaybe ((Rank1.<$) Rank1.<*> Rank1.guard . f)
+
+  filterA :: (Traversable g, Rank1.Applicative p) => (∀ k . a k -> p Bool) -> g a -> p (g a)
+  filterA f = mapMaybeA (\ x -> (x Rank1.<$) . Rank1.guard Rank1.<$> f x)
+
+  mapMaybe :: (∀ k . a k -> Maybe (b k)) -> g a -> g b
+  mapMaybe f = catMaybes . fmap (Rank1.Compose . f)
+
+  mapMaybeA :: (Traversable g, Rank1.Applicative p) => (∀ k . a k -> p (Maybe (b k))) -> g a -> p (g b)
+  mapMaybeA f = Rank1.fmap catMaybes . traverse (Rank1.fmap Rank1.Compose . f)
+
+  mapEither :: (∀ k . a k -> Either (b k) (c k)) -> g a -> (g b, g c)
+  mapEither f = (,) Rank1.<$> mapMaybe (either Just (Rank1.pure Nothing) . f)
+                    Rank1.<*> mapMaybe (either (Rank1.pure Nothing) Just . f)
+
+  mapEitherA :: (Traversable g, Rank1.Applicative p) => (∀ k . a k -> p (Either (b k) (c k))) -> g a -> p (g b, g c)
+  mapEitherA f = Rank1.liftA2 (,) Rank1.<$> mapMaybeA (Rank1.fmap (Just `either` Rank1.pure Nothing) . f)
+                                  Rank1.<*> mapMaybeA (Rank1.fmap (Rank1.pure Nothing `either` Just) . f)
+
+  catMaybes :: g (Rank1.Compose Maybe a) -> g a
+  catMaybes = mapMaybe Rank1.getCompose
+
+infixl 4 <$?>, <*?>
+
+(<$?>) :: Filtrable g => (∀ k . a k -> Maybe (b k)) -> g a -> g b
+(<$?>) = mapMaybe
+
+(<*?>) :: (Applicative p, Filtrable p) => p (a ~> Rank1.Compose Maybe b) -> p a -> p b
+f <*?> x = catMaybes (f <*> x)
+
+instance (Functor f, Rank1.Filtrable g) => Filtrable (Compose f g) where
+  mapMaybe f (Compose as) = Compose (Rank1.Compose . Rank1.mapMaybe f . Rank1.getCompose <$> as)
+
+instance (Rank1.Functor f, Functor g) => Functor (Rank1.Compose f g) where
+  f <$> Rank1.Compose as = Rank1.Compose ((<$>) f Rank1.<$> as)
+
+instance (Rank1.Functor f, Filtrable g) => Filtrable (Rank1.Compose f g) where
+  mapMaybe f (Rank1.Compose as) = Rank1.Compose (mapMaybe f Rank1.<$> as)
+
+instance (Filtrable f, Filtrable g) => Filtrable (Product f g) where
+  mapMaybe f (Pair as bs) = Pair (mapMaybe f as) (mapMaybe f bs)
